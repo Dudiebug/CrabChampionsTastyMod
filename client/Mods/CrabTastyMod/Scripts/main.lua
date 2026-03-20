@@ -23,6 +23,12 @@ local TICK_MS           = 500   -- how often to recalculate (ms)
 
 local tastyDA   = nil   -- cached DA_Perk_TastyOrange reference
 local ptSet     = false -- true once PerkType has been written
+local descSet   = false -- true once Description has been written
+
+local PERK_DESC = "Damage increased by 3% for each weapon mod level that you have."
+
+-- Field names to try for the perk description (most likely first).
+local DESC_FIELDS = { "Description", "PerkDescription", "DescriptionText", "Tooltip", "FlavorText" }
 
 local function findTastyDA()
     -- Return cached if still valid
@@ -127,6 +133,28 @@ local function tick()
             print("[TastyMod] PerkType → 72 (Collector host). Now computing BaseBuff dynamically.\n")
         else
             print("[TastyMod] Could not set PerkType: " .. tostring(err) .. "\n")
+        end
+    end
+
+    -- Step 1b: Overwrite the perk description once.
+    if not descSet then
+        local wrote = false
+        for _, field in ipairs(DESC_FIELDS) do
+            local ok, err = pcall(function()
+                da:SetPropertyValue(field, PERK_DESC)
+            end)
+            if ok then
+                descSet = true
+                wrote   = true
+                print("[TastyMod] Description written via field '" .. field .. "'.\n")
+                break
+            else
+                print("[TastyMod] Field '" .. field .. "' failed: " .. tostring(err) .. "\n")
+            end
+        end
+        if not wrote then
+            print("[TastyMod] WARNING: Could not write description — none of the candidate fields worked.\n")
+            descSet = true  -- stop retrying, don't spam
         end
     end
 
