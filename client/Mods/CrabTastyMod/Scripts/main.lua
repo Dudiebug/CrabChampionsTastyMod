@@ -68,6 +68,7 @@ local function countArr(obj, propName)
 end
 
 -- Count how many times TastyOrange appears in the Perks array (= perk level).
+-- UE4SS TArray-of-structs: ForEach yields a wrapper; elem:get() unwraps the struct.
 local function countTastyLevel(ps)
     if not tastyDA then return 0 end
     local count = 0
@@ -76,21 +77,11 @@ local function countTastyLevel(ps)
         if not arr then return end
         arr:ForEach(function(_, elem)
             pcall(function()
-                -- Try direct field access first, fall back to GetPropertyValue
-                local da = nil
-                local ok1, v1 = pcall(function() return elem.PerkDA end)
-                if ok1 and v1 then
-                    da = v1
-                else
-                    local ok2, v2 = pcall(function() return elem:GetPropertyValue("PerkDA") end)
-                    if ok2 and v2 then da = v2 end
-                end
-                if da then
-                    local ok3, same = pcall(function() return da == tastyDA end)
-                    if ok3 and same then
-                        count = count + 1
-                    end
-                end
+                if not elem:get():IsValid() then return end
+                local ok, da = pcall(function() return elem:get().PerkDA end)
+                if not ok or not da then return end
+                local okeq, same = pcall(function() return da == tastyDA end)
+                if okeq and same then count = count + 1 end
             end)
         end)
     end)
