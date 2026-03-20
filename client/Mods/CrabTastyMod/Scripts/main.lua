@@ -6,13 +6,14 @@
 --   PerkType=72 (Collector) as a C++ host and trick it with math:
 --
 --     Collector formula:  damage_bonus = BaseBuff × perkCount
---     We want:            damage_bonus = modCount  × DAMAGE_PER_MOD
---     Therefore:          BaseBuff     = modCount  × DAMAGE_PER_MOD / perkCount
+--     We want:            damage_bonus = modCount  × DAMAGE_PER_MOD × tastyLevel
+--     Therefore:          BaseBuff     = modCount  × DAMAGE_PER_MOD × tastyLevel / perkCount
 --
+--   tastyLevel = how many times TastyOrange appears in the Perks array (i.e. perk level).
 --   Updated every TICK_MS so it stays accurate as you pick up / lose items.
 --   This change is local only — DataAssets are per-process, no sync needed.
 
-local DAMAGE_PER_MOD    = 3.0   -- % per weapon mod (change this to adjust scaling)
+local DAMAGE_PER_MOD    = 3.0   -- % per weapon mod per level (change this to adjust scaling)
 local PERK_TYPE_HOST    = 72    -- Collector: game computes BaseBuff × perkCount
 local TICK_MS           = 500   -- how often to recalculate (ms)
 
@@ -28,23 +29,29 @@ local function findTastyDA()
     if tastyDA then
         local ok, v = pcall(function() return tastyDA:IsValid() end)
         if ok and v then return tastyDA end
+        print("[TastyMod] Cached DA became invalid — rescanning.\n")
         tastyDA = nil
         ptSet   = false
     end
     local all = FindAllOf("CrabPerkDA")
-    if not all then return nil end
+    if not all then
+        print("[TastyMod] FindAllOf(CrabPerkDA) returned nil — no DAs loaded yet.\n")
+        return nil
+    end
+    print("[TastyMod] Scanning " .. #all .. " CrabPerkDA(s) for TastyOrange...\n")
     for _, da in ipairs(all) do
         local ok, n = pcall(function() return da:GetFullName() end)
         if ok and n and tostring(n):lower():find("tastyorange") then
+            print("[TastyMod] Found DA: " .. tostring(n) .. "\n")
             tastyDA = da
             return da
         end
     end
+    print("[TastyMod] TastyOrange DA not found in scan.\n")
     return nil
 end
 
 -- Count elements in a TArray on a UObject without crashing on struct arrays.
--- ForEach callback signature: (index, element) — we just count.
 local function countArr(obj, propName)
     local n = 0
     pcall(function()
@@ -52,6 +59,36 @@ local function countArr(obj, propName)
         if arr then arr:ForEach(function() n = n + 1 end) end
     end)
     return n
+end
+
+-- Count how many times TastyOrange appears in the Perks array (= perk level).
+local function countTastyLevel(ps)
+    if not tastyDA then return 0 end
+    local count = 0
+    pcall(function()
+        local arr = ps:GetPropertyValue("Perks")
+        if not arr then return end
+        arr:ForEach(function(_, elem)
+            pcall(function()
+                -- Try direct field access first, fall back to GetPropertyValue
+                local da = nil
+                local ok1, v1 = pcall(function() return elem.PerkDA end)
+                if ok1 and v1 then
+                    da = v1
+                else
+                    local ok2, v2 = pcall(function() return elem:GetPropertyValue("PerkDA") end)
+                    if ok2 and v2 then da = v2 end
+                end
+                if da then
+                    local ok3, same = pcall(function() return da == tastyDA end)
+                    if ok3 and same then
+                        count = count + 1
+                    end
+                end
+            end)
+        end)
+    end)
+    return count
 end
 
 local function getLocalPS()
@@ -70,15 +107,18 @@ end
 -- ──────────────────────────────────────────────────────────────────────────────
 
 local function tick()
+    print("[TastyMod] Tick...\n")
+
     local da = findTastyDA()
     if not da then
-        -- DA not loaded yet — keep trying
+        print("[TastyMod] DA not ready — retrying in " .. TICK_MS .. "ms.\n")
         ExecuteWithDelay(TICK_MS, tick)
         return
     end
 
     -- Step 1: Set PerkType = Collector once (C++ host behavior).
     if not ptSet then
+        print("[TastyMod] Attempting to set PerkType → " .. PERK_TYPE_HOST .. "...\n")
         local ok, err = pcall(function()
             da:SetPropertyValue("PerkType", PERK_TYPE_HOST)
         end)
@@ -90,17 +130,31 @@ local function tick()
         end
     end
 
-    -- Step 2: Recalculate BaseBuff = modCount × DAMAGE_PER_MOD / perkCount.
+    -- Step 2: Recalculate BaseBuff = modCount × DAMAGE_PER_MOD × tastyLevel / perkCount.
     local ps = getLocalPS()
-    if ps then
-        local modCount  = countArr(ps, "WeaponMods")
-        local perkCount = countArr(ps, "Perks")
+    if not ps then
+        print("[TastyMod] PlayerState not found — skipping BaseBuff update.\n")
+        ExecuteWithDelay(TICK_MS, tick)
+        return
+    end
 
-        -- TastyOrange only matters if actually equipped (perkCount ≥ 1).
-        -- Dividing by zero is also bad, so guard both.
-        if perkCount > 0 then
-            local newBuff = (modCount * DAMAGE_PER_MOD) / perkCount
-            pcall(function() da:SetPropertyValue("BaseBuff", newBuff) end)
+    local modCount   = countArr(ps, "WeaponMods")
+    local perkCount  = countArr(ps, "Perks")
+    local tastyLevel = countTastyLevel(ps)
+    print("[TastyMod] modCount=" .. modCount .. "  perkCount=" .. perkCount .. "  tastyLevel=" .. tastyLevel .. "\n")
+
+    if perkCount <= 0 then
+        print("[TastyMod] perkCount is 0 — skipping BaseBuff update.\n")
+    elseif tastyLevel <= 0 then
+        print("[TastyMod] TastyOrange not equipped — skipping BaseBuff update.\n")
+    else
+        local newBuff = (modCount * DAMAGE_PER_MOD * tastyLevel) / perkCount
+        print("[TastyMod] Setting BaseBuff → " .. string.format("%.4f", newBuff) ..
+              "  (" .. modCount .. " mods × " .. DAMAGE_PER_MOD .. "% × lv" .. tastyLevel ..
+              " / " .. perkCount .. " perks)\n")
+        local ok, err = pcall(function() da:SetPropertyValue("BaseBuff", newBuff) end)
+        if not ok then
+            print("[TastyMod] Failed to set BaseBuff: " .. tostring(err) .. "\n")
         end
     end
 
@@ -110,4 +164,4 @@ end
 -- Short initial delay so DataAssets finish streaming before the first scan.
 ExecuteWithDelay(500, tick)
 
-print("[TastyMod] Loaded — TastyOrange: +" .. DAMAGE_PER_MOD .. "% damage per weapon mod owned.\n")
+print("[TastyMod] Loaded — TastyOrange: +" .. DAMAGE_PER_MOD .. "% damage per weapon mod per level owned.\n")
